@@ -1,0 +1,35 @@
+name: live-runs
+
+# Times are UTC. Spain is UTC+1 in winter (UTC+2 from late March - shift these an hour earlier then).
+on:
+  schedule:
+    - cron: "50 15 * * 2-5"   # Tue-Fri 16:50 Spain -> Euroleague (earliest tip-offs are 17:00)
+    # ACB weekends: not on the odds feed - add back once there's a source
+  workflow_dispatch:
+    inputs:
+      league:
+        description: "euroleague or acb"
+        default: "euroleague"
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      TZ: Europe/Madrid
+      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET: ${{ secrets.SUPABASE_SECRET }}
+      TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests tzdata
+      - name: Watch
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then LEAGUE="${{ inputs.league }}";
+          else LEAGUE=euroleague; fi
+          echo "Watching $LEAGUE"
+          python -u live_runs.py "$LEAGUE"
