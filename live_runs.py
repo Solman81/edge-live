@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 RUNS = [(10, 0), (11, 1), (12, 2), (13, 3), (14, 4), (15, 5)]   # (runner pts, opponent pts) - any one triggers ONE ping
 LATEST_ELAPSED = 1500                   # only ping up to Q3 5:00 left (25 of 40 min played) - first half / early Q3
 ACB_LATEST_WALL_MIN = 75                # ACB feed has no game clock: ~75 min after tip-off is roughly early Q3
-POLL_SECONDS = 20                       # Euroleague feed (free)
+POLL_SECONDS = 10                       # Euroleague feed (free)
 ODDS_POLL_SECONDS = 45                  # ACB via The Odds API (costs 1 unit per check)
 MAX_HOURS = 5.6                         # GitHub stops jobs at 6h
 ACB_ODDS_KEY = "basketball_spain_acb"   # sport key on the odds feed - --test confirms the real one
