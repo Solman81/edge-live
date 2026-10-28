@@ -4,12 +4,19 @@ name: live-runs
 on:
   schedule:
     - cron: "50 15 * * 2-5"   # Tue-Fri 16:50 Spain -> Euroleague (earliest tip-offs are 17:00)
+    - cron: "20 16 * * 2-5"   # back-ups: GitHub sometimes starts late or skips a scheduled run.
+    - cron: "40 17 * * 2-5"   #   Only one watcher runs at a time (see concurrency below);
+    - cron: "10 18 * * 2-5"   #   a back-up that finds one already running simply waits, then exits.
     # ACB weekends: not on the odds feed - add back once there's a source
   workflow_dispatch:
     inputs:
       league:
         description: "euroleague or acb"
         default: "euroleague"
+
+concurrency:
+  group: live-watch
+  cancel-in-progress: false
 
 jobs:
   watch:
