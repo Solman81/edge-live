@@ -152,7 +152,7 @@ def watch_euroleague(comp="E", league="Euroleague"):
     if not games:
         print(f"No {league} games today."); return
     print(f"{league} today: " + ", ".join(f"{h} v {a} {t}" for _, h, a, t in games))
-    det = {g[0]: Detector() for g in games}; done = set()
+    det = {g[0]: Detector() for g in games}; done = set(); primed = set()
     end = time.time() + MAX_HOURS * 3600
     while time.time() < end and len(done) < len(games):
         for code, home, away, _ in games:
@@ -161,7 +161,12 @@ def watch_euroleague(comp="E", league="Euroleague"):
                 states, fin = el_states(comp, code)
             except Exception as e:
                 print(f"  {home} v {away}: feed error {e}"); continue
-            for r in det[code].update(states):
+            runs = det[code].update(states)
+            if code not in primed:              # first look at a game already under way: learn the history, don't ping old runs
+                primed.add(code)
+                if runs: print(f"  {home} v {away}: joined at {states[-1][1]}-{states[-1][2]}, {len(runs)} earlier run(s) skipped")
+                runs = [r for r in runs if r["at"] == states[-1]]   # ...unless the run ended on the very latest basket
+            for r in runs:
                 if r["at"][0] <= LATEST_ELAPSED: ping(league, home, away, r, 600)
             if states and states[-1][0] > LATEST_ELAPSED and not fin:
                 done.add(code); print(f"  {home} v {away}: past the cut-off, stopped watching"); continue
