@@ -12,7 +12,7 @@ from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
 # ------------------------------------------------------------------ settings
-RUNS = [(10, 0), (11, 1), (12, 2), (13, 3), (14, 4), (15, 5)]   # (runner pts, opponent pts) - any one triggers ONE ping
+RUNS = [(12, 0)]                        # 12 unanswered points only
 LATEST_ELAPSED = 1500                   # only ping up to Q3 5:00 left (25 of 40 min played) - first half / early Q3
 ACB_LATEST_WALL_MIN = 75                # ACB feed has no game clock: ~75 min after tip-off is roughly early Q3
 POLL_SECONDS = 10                       # Euroleague feed (free)
