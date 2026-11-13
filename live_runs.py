@@ -1,7 +1,7 @@
 """
 LIVE RUN WATCHER - pings Telegram when a team goes on a scoring run, so you can FADE it on the live spread.
   Euroleague: official live play-by-play (free, every basket with its clock time)
-  ACB:        The Odds API live scores (only if the feed covers ACB - see --test), ~1 unit per check
+  ACB:        official acb.com live shot data (free; needs the site key - Supabase setting acb_apikey)
 
 Runs on GitHub (live.yml) during game windows. On your laptop:
   python live_runs.py   (or F5 in IDLE) checks the feeds: today's games, a replay of an old game, ACB on the odds feed
@@ -12,13 +12,10 @@ from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
 # ------------------------------------------------------------------ settings
-RUNS = [(12, 0)]                        # 12 unanswered points only
+RUNS = [(12, 0)]                       # 12 unanswered points only (changed 10 Nov)
 LATEST_ELAPSED = 1500                   # only ping up to Q3 5:00 left (25 of 40 min played) - first half / early Q3
-ACB_LATEST_WALL_MIN = 75                # ACB feed has no game clock: ~75 min after tip-off is roughly early Q3
 POLL_SECONDS = 10                       # Euroleague feed (free)
-ODDS_POLL_SECONDS = 45                  # ACB via The Odds API (costs 1 unit per check)
-MAX_HOURS = 5.6                         # GitHub stops jobs at 6h
-ACB_ODDS_KEY = "basketball_spain_acb"   # sport key on the odds feed - --test confirms the real one
+MAX_HOURS = 5.8                         # GitHub stops jobs at 6h
 try:
     MAD = ZoneInfo("Europe/Madrid")
 except Exception:                       # Windows without tzdata: use the computer's own clock (Spain)
@@ -174,38 +171,91 @@ def watch_euroleague(comp="E", league="Euroleague"):
                 done.add(code); print(f"  final: {home} {states[-1][1]}-{states[-1][2]} {away}" if states else f"  final: {home} v {away}")
         time.sleep(POLL_SECONDS)
 
-# ------------------------------------------------------------------ ACB (via The Odds API live scores)
-OH = {"X-RapidAPI-Key": ODDS_API_KEY or "", "X-RapidAPI-Host": "odds.p.rapidapi.com"}
+# ------------------------------------------------------------------ ACB (official acb.com live data)
+ACB = "https://api2.acb.com/api/matchdata"
+ACB_KEY_DEFAULT = "0dd94928-6f57-4c08-a3bd-b1b2f092976e"   # copied from live.acb.com - can be overridden in Supabase settings (acb_apikey)
 
-def watch_acb(league="ACB"):
-    start = time.time(); end = start + MAX_HOURS * 3600
-    det, names, done, seen_live = {}, {}, set(), False
-    while time.time() < end:
-        r = requests.get(f"https://odds.p.rapidapi.com/v4/sports/{ACB_ODDS_KEY}/scores", headers=OH, timeout=30)
-        if r.status_code != 200:
-            print(f"ACB scores [{r.status_code}] {r.text[:150]}"); return
-        live = 0
-        for g in r.json() or []:
-            ko = datetime.fromisoformat(g["commence_time"].replace("Z", "+00:00"))
-            if ko > datetime.now(timezone.utc) or g["id"] in done: continue
-            sc = {s["name"]: int(s["score"]) for s in (g.get("scores") or []) if s.get("score") not in (None, "")}
-            h, a = g["home_team"], g["away_team"]
-            if g.get("completed") or (datetime.now(timezone.utc) - ko).total_seconds() > ACB_LATEST_WALL_MIN * 60:
-                done.add(g["id"]); continue
-            if h not in sc or a not in sc: continue
-            live += 1
-            el = (datetime.now(timezone.utc) - ko).total_seconds() * 2400 / 6600   # rough game clock from wall time
-            d = det.setdefault(g["id"], Detector()); names[g["id"]] = (h, a)
-            if not d.ev or (sc[h], sc[a]) != tuple(d.ev[-1][1:]):
-                for run in d.update(d.ev + [(el, sc[h], sc[a])]):
-                    if (datetime.now(timezone.utc) - ko).total_seconds() <= ACB_LATEST_WALL_MIN * 60:
-                        ping(league, h, a, run, 600)
-        seen_live = seen_live or live > 0
-        if seen_live and live == 0:
-            print("No ACB games live any more."); return
-        if not seen_live and time.time() - start > 3 * 3600:
-            print("No ACB games went live."); return
-        time.sleep(ODDS_POLL_SECONDS)
+def sb_setting(key, default=None):
+    try:
+        r = requests.get(f"{SB_URL}/rest/v1/settings", headers={"apikey": SB_SECRET},
+                         params={"select": "value", "key": f"eq.{key}"}, timeout=20)
+        v = r.json()[0]["value"]; return v if v not in (None, "") else default
+    except Exception:
+        return default
+
+def sb_save(key, value):
+    try:
+        requests.post(f"{SB_URL}/rest/v1/settings", params={"on_conflict": "key"}, timeout=20,
+                      headers={"apikey": SB_SECRET, "Content-Type": "application/json",
+                               "Prefer": "resolution=merge-duplicates"}, json=[{"key": key, "value": value}])
+    except Exception as e:
+        print("couldn't save", key, e)
+
+def acb_get(path, **params):
+    h = {**UA, "x-apikey": str(sb_setting("acb_apikey", ACB_KEY_DEFAULT)).strip('"'),
+         "Referer": "https://live.acb.com/", "Origin": "https://live.acb.com"}
+    r = requests.get(f"{ACB}/{path}", headers=h, params=params, timeout=30)
+    if r.status_code in (401, 403):
+        tg("⚠️ ACB watcher: acb.com refused the key - grab a new x-apikey from live.acb.com (F12 → Network).")
+        raise SystemExit(f"ACB key refused [{r.status_code}]")
+    r.raise_for_status(); return r.json()
+
+def acb_round_games(day=None):
+    """Games of the round containing `day` (Spain time). Walks forward from the last known match id."""
+    day = day or datetime.now(MAD).date()
+    seed = int(sb_setting("acb_seed_match", 105432))
+    for _ in range(8):
+        ml = acb_get("Menu/matchlist", matchId=seed, format="round", delay=45)
+        ms = ml.get("matches") or []
+        if not ms: break
+        def start(m): return datetime.fromisoformat((m.get("delayedStartDateTime") or m["startDateTime"]).replace("Z", "+00:00")).astimezone(MAD)
+        last_day = max(start(m).date() for m in ms)
+        if last_day >= day:
+            sb_save("acb_seed_match", min(m["id"] for m in ms))
+            return [(m["id"], m["homeTeam"]["shortName"], m["awayTeam"]["shortName"], start(m), m.get("matchStatus"))
+                    for m in sorted(ms, key=start)]
+        seed = max(m["id"] for m in ms) + 1           # next round
+    return []
+
+def acb_states(match_id):
+    d = acb_get("MatchShots/match-shots", matchId=match_id)
+    def el(s):
+        left = s["minute"] * 60 + s["second"]
+        return (s["quarter"] - 1) * 600 + 600 - left if s["quarter"] <= 4 else 2400 + (s["quarter"] - 5) * 300 + 300 - left
+    states, last = [], (0, 0)
+    for sh in sorted(d.get("shotPoints") or [], key=lambda s: (el(s), s["id"])):
+        sc = (sh["scoreHome"], sh["scoreAway"])
+        if sc != last: states.append((el(sh), sc[0], sc[1])); last = sc
+    return states, bool(d.get("matchFinished"))
+
+def watch_acb(window="00:00-23:59", league="ACB"):
+    lo, hi = window.split("-")
+    today = datetime.now(MAD).date()
+    games = [g for g in acb_round_games(today) if g[3].date() == today and lo <= g[3].strftime("%H:%M") <= hi]
+    if not games:
+        print(f"No ACB games today between {lo} and {hi}."); return
+    print(f"ACB today ({lo}-{hi}): " + ", ".join(f"{h} v {a} {t:%H:%M}" for _, h, a, t, _ in games))
+    det = {g[0]: Detector() for g in games}; done, primed = set(), set()
+    end = time.time() + MAX_HOURS * 3600
+    while time.time() < end and len(done) < len(games):
+        for mid, home, away, ko, _ in games:
+            if mid in done or datetime.now(MAD) < ko - timedelta(minutes=2): continue
+            try:
+                states, fin = acb_states(mid)
+            except SystemExit:
+                raise
+            except Exception as e:
+                print(f"  {home} v {away}: feed error {e}"); continue
+            runs = det[mid].update(states)
+            if mid not in primed:
+                primed.add(mid)
+                if runs: print(f"  {home} v {away}: joined at {states[-1][1]}-{states[-1][2]}, {len(runs)} earlier run(s) skipped")
+                runs = [r for r in runs if states and r["at"] == states[-1]]
+            for r in runs:
+                if r["at"][0] <= LATEST_ELAPSED: ping(league, home, away, r, 600)
+            if fin or (states and states[-1][0] > LATEST_ELAPSED):
+                done.add(mid); print(f"  {home} v {away}: " + ("final" if fin else "past the cut-off") + ", stopped watching")
+        time.sleep(POLL_SECONDS)
 
 # ------------------------------------------------------------------ laptop test
 def test():
@@ -233,18 +283,20 @@ def test():
             else: print(f"   (after the cut-off, no ping: {r['run']} at {clock_txt(r['at'][0], 600)})")
     except Exception as e:
         print("   FAILED:", e)
-    print("\n3) Basketball leagues on your odds feed (free call, no quota)")
+    print("\n3) ACB: this round's games from acb.com")
     try:
-        r = requests.get("https://odds.p.rapidapi.com/v4/sports", headers=OH, params={"all": "true"}, timeout=30)
-        for s in r.json():
-            if s["key"].startswith("basketball"): print(f"   {s['key']:32s} {s['title']}  active={s['active']}")
-    except Exception as e:
+        for i, h, a, t, st in acb_round_games(): print(f"   {t:%a %d %b %H:%M}  {h} v {a}  ({st})")
+    except BaseException as e:
         print("   FAILED:", e)
 
 if __name__ == "__main__":
     if len(sys.argv) == 1: sys.argv.append("--test")      # plain F5 in IDLE = test mode
     if "--test" in sys.argv: test()
-    elif len(sys.argv) > 1 and sys.argv[1] == "acb": watch_acb()
+    elif len(sys.argv) > 1 and sys.argv[1] == "acb": watch_acb(sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else "00:00-23:59")
+    elif len(sys.argv) > 1 and sys.argv[1] == "acbtest":
+        g = acb_round_games(); print("ACB round:", *[f"  {t:%a %d %b %H:%M}  {h} v {a}  ({st}, id {i})" for i, h, a, t, st in g], sep="\n")
+        st, fin = acb_states(105432); print(f"Replay Barca v Breogan: {len(st)} scores, finished={fin}, final {st[-1][1]}-{st[-1][2]}")
+        input("\nPaste this to Claude. Press Enter to close...")
     else: watch_euroleague()
     if "--test" in sys.argv:
         input("\nPaste everything back to Claude. Press Enter to close...")
