@@ -198,7 +198,8 @@ def acb_get(path, **params):
     if r.status_code in (401, 403):
         tg("⚠️ ACB watcher: acb.com refused the key - grab a new x-apikey from live.acb.com (F12 → Network).")
         raise SystemExit(f"ACB key refused [{r.status_code}]")
-    r.raise_for_status(); return r.json()
+    r.raise_for_status()
+    return r.json() if r.text.strip() else {}            # empty reply = no data yet
 
 def acb_round_games(day=None):
     """Games of the round containing `day` (Spain time). Walks forward from the last known match id."""
@@ -217,16 +218,32 @@ def acb_round_games(day=None):
         seed = max(m["id"] for m in ms) + 1           # next round
     return []
 
+ACB_HIST = {}                     # match id -> score states seen so far
+ACB_DELAY = [0]                   # live.acb.com itself asks for delay=45; we try 0 (fresher) and fall back to 45
+
 def acb_states(match_id):
-    d = acb_get("MatchShots/match-shots", matchId=match_id)
-    def el(s):
-        left = s["minute"] * 60 + s["second"]
-        return (s["quarter"] - 1) * 600 + 600 - left if s["quarter"] <= 4 else 2400 + (s["quarter"] - 5) * 300 + 300 - left
-    states, last = [], (0, 0)
-    for sh in sorted(d.get("shotPoints") or [], key=lambda s: (el(s), s["id"])):
-        sc = (sh["scoreHome"], sh["scoreAway"])
-        if sc != last: states.append((el(sh), sc[0], sc[1])); last = sc
-    return states, bool(d.get("matchFinished"))
+    """Live header polled every few seconds: score, quarter, clock. Builds the score history as it goes."""
+    try:
+        d = acb_get("MatchHeader/match-header", matchId=match_id, delay=ACB_DELAY[0])
+    except SystemExit:
+        raise
+    except Exception:
+        if ACB_DELAY[0] == 45: raise
+        ACB_DELAY[0] = 45; print("  ACB: delay=0 refused, using delay=45")
+        d = acb_get("MatchHeader/match-header", matchId=match_id, delay=45)
+    hist = ACB_HIST.setdefault(match_id, [])
+    status = (d.get("matchStatus") or "").upper()
+    q = int(d.get("currentQuarter") or 0)
+    if q >= 1 and status not in ("NOT_STARTED", ""):
+        try:
+            mm, ss = (d.get("timeLeft") or "00:00").split(":")[:2]; left = int(mm) * 60 + int(float(ss))
+        except ValueError:
+            left = 0
+        el = (q - 1) * 600 + 600 - left if q <= 4 else 2400 + (q - 5) * 300 + 300 - left
+        sc = (int(d.get("currentHomeScore") or 0), int(d.get("currentAwayScore") or 0))
+        if not hist or sc != tuple(hist[-1][1:]):
+            hist.append((el, sc[0], sc[1]))
+    return hist, status in ("FINALIZED", "FINISHED", "ENDED")
 
 def watch_acb(window="00:00-23:59", league="ACB"):
     lo, hi = window.split("-")
@@ -295,7 +312,7 @@ if __name__ == "__main__":
     elif len(sys.argv) > 1 and sys.argv[1] == "acb": watch_acb(sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else "00:00-23:59")
     elif len(sys.argv) > 1 and sys.argv[1] == "acbtest":
         g = acb_round_games(); print("ACB round:", *[f"  {t:%a %d %b %H:%M}  {h} v {a}  ({st}, id {i})" for i, h, a, t, st in g], sep="\n")
-        st, fin = acb_states(105432); print(f"Replay Barca v Breogan: {len(st)} scores, finished={fin}, final {st[-1][1]}-{st[-1][2]}")
+        st, fin = acb_states(105432); print(f"Header check Barca v Breogan: {st[-1][1]}-{st[-1][2]} finished={fin}" if st else "Header check: no score")
         input("\nPaste this to Claude. Press Enter to close...")
     else: watch_euroleague()
     if "--test" in sys.argv:
