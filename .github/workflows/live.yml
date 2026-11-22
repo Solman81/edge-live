@@ -7,21 +7,24 @@ on:
     - cron: "20 16 * * 2-5"   # back-ups: GitHub sometimes starts late or skips a scheduled run.
     - cron: "40 17 * * 2-5"   #   Only one watcher runs at a time (see concurrency below);
     - cron: "10 18 * * 2-5"   #   a back-up that finds one already running simply waits, then exits.
-    # ACB weekends: not on the odds feed - add back once there's a source
+    # ACB weekends are started by Supabase (exact times) - see the cron jobs there
   workflow_dispatch:
     inputs:
       league:
         description: "euroleague or acb"
         default: "euroleague"
+      window:
+        description: "ACB only: tip-off window, e.g. 11:00-16:29"
+        default: ""
 
-concurrency:
-  group: live-watch
+concurrency:          # one watcher per league/window; duplicates wait, then exit
+  group: live-${{ inputs.league || 'euroleague' }}-${{ inputs.window || 'all' }}
   cancel-in-progress: false
 
 jobs:
   watch:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 355
     env:
       TZ: Europe/Madrid
       ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
@@ -39,4 +42,4 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then LEAGUE="${{ inputs.league }}";
           else LEAGUE=euroleague; fi
           echo "Watching $LEAGUE"
-          python -u live_runs.py "$LEAGUE"
+          python -u live_runs.py "$LEAGUE" "${{ inputs.window }}"
